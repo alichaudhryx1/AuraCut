@@ -1,0 +1,47 @@
+# Build the Windows .exe for AuraCut with PyInstaller.
+# A Windows .exe can only be built on Windows, so this runs on GitHub's
+# free Windows runner. The finished AuraCut.exe is attached to each run
+# as an artifact named "AuraCut-Windows" (Actions tab -> latest run).
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Download ffmpeg
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip"
+          Expand-Archive -Path "ffmpeg.zip" -DestinationPath "ffmpeg-dl"
+          $exe = Get-ChildItem -Path "ffmpeg-dl" -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          if (-not $exe) { throw "ffmpeg.exe not found in the downloaded zip" }
+          Copy-Item $exe.FullName -Destination "ffmpeg.exe"
+          .\ffmpeg.exe -version | Select-Object -First 1
+
+      - name: Build exe
+        run: pyinstaller auracut.spec --noconfirm --clean
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuraCut-Windows
+          path: dist/AuraCut.exe
+          if-no-files-found: error
