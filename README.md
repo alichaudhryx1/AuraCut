@@ -34,6 +34,17 @@ released under the same [MIT](LICENSE) licence. What changed here:
 - **Your own AI.** Gemini, OpenAI, Grok, Groq, OpenRouter, Claude, a local model through Ollama, or anything that
   speaks the OpenAI chat format. No key at all also works: clips are then picked by loudness.
 
+## Easiest way (Windows)
+
+No terminal, no git, nothing to install by hand:
+
+1. Download AuraCut: go to https://github.com/alichaudhryx1/AuraCut, click the green **Code** button, then **Download ZIP**.
+2. Extract the ZIP anywhere (for example `C:\AuraCut`).
+3. Double-click **run.bat**. It checks Python and ffmpeg, installs anything missing, and starts AuraCut.
+4. Your browser opens at http://127.0.0.1:8765 - that is AuraCut.
+
+The first start downloads the speech model (about 480 MB, once). Keep the black window open while you use AuraCut; closing it stops the server.
+
 ## Quick start
 
 You need Python 3.10 or newer and `ffmpeg`. On Windows: `winget install Gyan.FFmpeg`. On a Mac: `brew install ffmpeg`.
