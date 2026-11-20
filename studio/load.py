@@ -35,7 +35,8 @@ def _cpu_times():
     return sum(v) - v[3] - v[4], sum(v)                                    # everything except idle and waiting on disk
 
 
-def _ram_free_gb() -> float:
+def _ram_numbers():
+    """(total, available) memory in GB, on any machine."""
     if os.name == "nt":
         import ctypes
 
@@ -45,12 +46,21 @@ def _ram_free_gb() -> float:
         m = M()
         m.dwLength = ctypes.sizeof(M)
         ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
-        return m.avail / 1e9
+        return m.total / 1e9, m.avail / 1e9
+    total = avail = None
     with open("/proc/meminfo", encoding="ascii") as f:
         for line in f:
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) / 1e6
-    return 99.0
+            if line.startswith("MemTotal:"):
+                total = int(line.split()[1]) / 1e6
+            elif line.startswith("MemAvailable:"):
+                avail = int(line.split()[1]) / 1e6
+            if total is not None and avail is not None:
+                break
+    return (total if total is not None else 99.0), (avail if avail is not None else 99.0)
+
+
+def _ram_free_gb() -> float:
+    return _ram_numbers()[1]
 
 
 def _watch():
@@ -107,3 +117,24 @@ def state() -> dict:
     start()
     return {"cpu": round(_state["cpu"]), "ram_free_gb": round(_state["ram_free"], 1), "disk_free_gb": round(_state["disk_free"], 1),
             "busy": busy(), "busy_cpu": BUSY_CPU}
+
+
+def ram() -> dict:
+    """Memory right now: total, used and available, in GB, and the used share."""
+    total, avail = _ram_numbers()
+    used = max(0.0, total - avail)
+    return {"total_gb": round(total, 1), "used_gb": round(used, 1), "free_gb": round(avail, 1),
+            "used_pct": round(100.0 * used / total) if total else 0}
+
+
+def system() -> dict:
+    """Processor, memory and disk right now, for the settings page. The processor number is smoothed
+    over a few seconds, so one short spike does not swing it."""
+    start()
+    if not _state["at"]:      # the watcher has not measured the disk yet: read it once here, not 99.0
+        try:
+            _state["disk_free"] = shutil.disk_usage(config.DATA_DIR).free / 1e9
+            _state["at"] = time.time()
+        except Exception:  # noqa: BLE001
+            pass
+    return {"cpu": round(_state["cpu"]), "ram": ram(), "disk_free_gb": round(_state["disk_free"], 1)}

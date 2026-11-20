@@ -15,6 +15,20 @@ storage.json
 *.sqlite*
 *.log
 
+# ---- local evidence, scratch and machine scripts (never publish)
+benchmark-20261120/
+.spec-smoke/
+transcription-fix-20261120/
+spec-smoke-harness.py
+samples/
+GEMINI-FIX-PACK.md
+TEST-RECORD.md
+*.mp4
+clip02-frames.jpg
+start-server.sh
+monitor.sh
+test-monitor.log
+
 # ---- this computer only
 .claude/
 CLAUDE.local.md

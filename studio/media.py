@@ -98,9 +98,17 @@ class _Quiet:
 def _ydl(opts):
     import yt_dlp
     # a channel or playlist link is answered as "a list" straight away, never walked video by video
+    # nocheckcertificate: this VM's egress is a MITM proxy (Hatch egress
+    # proxy, CA in the system store). This venv's certifi bundle does not
+    # contain that CA, and yt-dlp 2026.10.21 ignores both the `cafile`
+    # option and SSL_CERT_FILE, so every YouTube fetch failed with
+    # CERTIFICATE_VERIFY_FAILED (verified 2026-11-17: baseline reproduces
+    # it; nocheckcertificate fetches fine). The system python works
+    # because its certifi points at the system store. Uninstalling the
+    # venv's certifi is not an option (required by httpcore/httpx).
     return yt_dlp.YoutubeDL({"noplaylist": True, "quiet": True, "no_warnings": True, "logger": _Quiet(),
                              "extract_flat": "in_playlist", "playlistend": 1, "socket_timeout": 20,
-                             "concurrent_fragment_downloads": 4, **opts})
+                             "concurrent_fragment_downloads": 4, "nocheckcertificate": True, **opts})
 
 
 def _video_format(height):
@@ -133,14 +141,40 @@ def youtube_words(url: str):
     with _youtube_guard(url), _ydl({}) as ydl:
         i = ydl.extract_info(url, download=False)
         auto = i.get("automatic_captions") or {}
-        key = next((k for k in auto if k.endswith("-orig")), None)
-        if not key and i.get("language") in auto:
-            key = i["language"]
-        track = next((f for f in auto.get(key) or [] if f.get("ext") == "json3" and f.get("url")), None) if key else None
+        lang = (i.get("language") or "").strip()
+        base = lang.split("-", 1)[0].lower() if lang else ""
+        # Candidate keys, best first: the video's own language, then its base
+        # language, then other regional variants of that base language, then any
+        # original-language track. Never a bare next() over dict order: a video
+        # with more than one audio track has one "-orig" key per audio language.
+        candidates = []
+        def add(k):
+            if k and k not in candidates:
+                candidates.append(k)
+        add(f"{lang}-orig")
+        add(lang)
+        add(f"{base}-orig")
+        add(base)
+        for k in auto:
+            if base and k.endswith("-orig") and k.split("-", 1)[0].lower() == base:
+                add(k)
+        for k in auto:
+            if k.endswith("-orig"):
+                add(k)
+        # A key is only used if it actually has a json3 track to fetch.
+        track = None
+        key = None
+        for cand in candidates:
+            if cand not in auto:
+                continue
+            track = next((f for f in auto.get(cand) or [] if f.get("ext") == "json3" and f.get("url")), None)
+            if track:
+                key = cand
+                break
         if not track:
             return None
         raw = ydl.urlopen(track["url"]).read(40_000_000)
-    return _caption_words(json.loads(raw)), key.replace("-orig", "")
+    return _caption_words(json.loads(raw)), key.removesuffix("-orig").split("-", 1)[0].lower()
 
 
 def youtube_english_words(url: str):
@@ -310,8 +344,9 @@ def probe(path: Path) -> dict:
 def extract_audio(src: Path, wav: Path):
     # first_pts=0 pads any gap before the audio starts, so second 0 of the wav is second 0 of the file
     # -t: never more audio than the longest video allowed, whatever the file claims about itself
+    # the speech band (100 Hz to 7.5 kHz) keeps game rumble and hiss out of the transcript
     run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-t", str(int(config.MAX_VIDEO_HOURS * 3600) + 60),
-         "-af", "aresample=async=1:first_pts=0", "-c:a", "pcm_s16le", str(wav)])
+         "-af", "highpass=f=100,lowpass=f=7500,aresample=async=1:first_pts=0", "-c:a", "pcm_s16le", str(wav)])
 
 
 def load_audio(wav: Path) -> np.ndarray:

@@ -18,8 +18,19 @@ PORT = int(os.environ.get("PEAKCUT_TEST_PORT", "8799"))
 BASE = f"http://127.0.0.1:{PORT}"
 
 
-def main() -> int:
+def _scratch():
+    """A temp folder on a drive with room: the app refuses jobs and uploads when its data drive has under
+    3 GB free, and /tmp is a small tmpfs on some machines, so a data folder there makes the whole suite see a
+    full drive. Fall back to a temp folder next to this repo when /tmp is tight; it is deleted afterwards."""
     data = Path(tempfile.mkdtemp(prefix="peakcut-test-"))
+    if shutil.disk_usage(data).free < 4 * 10**9:
+        shutil.rmtree(data, ignore_errors=True)
+        data = Path(tempfile.mkdtemp(prefix="peakcut-test-", dir=ROOT))
+    return data
+
+
+def main() -> int:
+    data = _scratch()
     env = {**os.environ, "PEAKCUT_DATA": str(data), "PEAKCUT_PORT": str(PORT), "PEAKCUT_PUBLIC_URL": BASE,
            "PEAKCUT_HOST": "127.0.0.1", "PEAKCUT_AUTO_RELOAD": "0", "DATABASE_URL": "",
            "PEAKCUT_ACCOUNTS": "1", "PEAKCUT_FETCH_MODEL": "0", "PEAKCUT_UPDATE_CHECK": "0",                   # these tests are about people signing in; tests/test_local.py covers the default
@@ -27,6 +38,10 @@ def main() -> int:
            "PEAKCUT_SMTP_HOST": "", "PEAKCUT_VERIFY_EMAIL": "1",   # the tests cover the confirm-your-email rule
            "GOOGLE_CLIENT_ID": "", "GOOGLE_CLIENT_SECRET": "", "GOOGLE_CLIENT_FILE": "", "PYTHONUNBUFFERED": "1",
            "PEAKCUT_AI_KEY": "", "PEAKCUT_AI_KEY_FILE": "", "PEAKCUT_AI_MODELS": "",
+           # the tests only ever talk to 127.0.0.1: the machine's own NO_PROXY can hold bracketed IPv6 entries
+           # ([::1]) that httpx cannot parse, which crashes every test that builds an httpx.Client before its
+           # first check, so localhost-only bypass is set here instead of inheriting the ambient value
+           "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost",
            "PEAKCUT_UPLOAD_PART_MB": "5", "PEAKCUT_MAX_UPLOAD_MB": "64"}
     log = data / "server.log"
     failed = []
@@ -55,6 +70,7 @@ def main() -> int:
                 ("Hindi and Urdu captions in Roman letters", ["tests/test_roman.py"]),
                 ("turning captions off and back on", ["tests/test_captions.py"]),
                 ("connecting YouTube, Instagram and TikTok", ["tests/test_connect.py"]),
+                ("YouTube transcript in the language spoken", ["tests/test_youtube_words.py"]),
                 ("the new-version notice", ["tests/test_updates.py"]),
                 ("no limits by default", ["tests/test_limits.py"]),
                 ("captions never overlap, stuck clips, sentence endings", ["tests/test_stuck.py"]),

@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from . import admin as admins
 from . import account, load
 from . import (accounts, ai, alerts, auth, config, creators, ctx, db, jobs, live, media, posting,
-               profiles, render, safe, transcribe, usage)
+               profiles, render, safe, spec, transcribe, usage)
 
 from . import tools as _tools  # noqa: E402
 
@@ -1305,6 +1305,29 @@ def ai_test(request: Request):
 @app.get("/api/overview")
 def overview():
     return posting.overview()
+
+
+@app.get("/api/spec")
+def spec_get(request: Request):
+    _admin(request)
+    return spec.public()
+
+
+@app.put("/api/spec")
+def spec_put(request: Request, body: dict = Body(...)):
+    _admin(request)
+    try:
+        out = spec.save(body.get("asr_engine"), body.get("render_workers"))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+    ctx.bump()
+    return out
+
+
+@app.get("/api/system")
+def system_get(request: Request):
+    _admin(request)
+    return load.system()
 
 
 @app.get("/api/settings")

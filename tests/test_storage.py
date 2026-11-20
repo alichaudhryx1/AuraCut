@@ -1,8 +1,22 @@
 """PeakCut's folder: said plainly when its drive is full, and movable. A move is chosen in the dashboard and done at
 the next start, before anything is open. Uses its own temporary folders; nothing else is touched."""
-import json, os, subprocess, sys, tempfile
+import json, os, shutil, subprocess, sys, tempfile
 from pathlib import Path
-base = Path(tempfile.mkdtemp(prefix="pc-stor-"))
+
+
+def _scratch():
+    """A temp folder on a drive with room: choosing a new folder needs 3 GB free
+    (storage.MIN_FREE_DISK_GB), and /tmp is a small tmpfs on some machines, so the
+    folder move is refused there and the test crashes. Fall back to a temp folder
+    next to this repo when /tmp is tight."""
+    base = Path(tempfile.mkdtemp(prefix="pc-stor-"))
+    if shutil.disk_usage(base).free < 4 * 10**9:
+        shutil.rmtree(base, ignore_errors=True)
+        base = Path(tempfile.mkdtemp(prefix="pc-stor-", dir=Path(__file__).resolve().parent.parent))
+    return base
+
+
+base = _scratch()
 old, new, pointer = base / "old-data", base / "bigger drive" / "PeakCut", base / "storage.json"
 os.environ.pop("PEAKCUT_DATA", None); os.environ.pop("PEAKCUT_MODELS", None)
 os.environ.update(DATABASE_URL="", PEAKCUT_STORAGE_FILE=str(pointer), PEAKCUT_ACCOUNTS="0", PEAKCUT_PUBLIC_URL="http://127.0.0.1:8765")
@@ -72,5 +86,5 @@ out = subprocess.run([sys.executable, "-c", "from studio import config, storage\
 check("a folder set in .env is left to .env", out.stdout.startswith("env |") and ".env" in out.stdout)
 
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
-import shutil; shutil.rmtree(base, ignore_errors=True)
+shutil.rmtree(base, ignore_errors=True)
 sys.exit(1 if fails else 0)

@@ -11,7 +11,7 @@ import traceback
 import uuid
 from pathlib import Path
 
-from . import brain, config, creators, ctx, facecam, games, load, media, quality, render, roman, safe, transcribe, usage
+from . import brain, config, creators, ctx, facecam, games, load, media, quality, render, roman, safe, spec, transcribe, usage
 
 class _FairQueue:
     """Whose video is next. Each person has their own line and the lines take turns, so someone who adds ten
@@ -409,13 +409,18 @@ def _caption_words(job, clip, words, off):
         raw = clip["fixed_words"]          # already tidied for this exact span: no second AI call
     else:
         raw = [w for w in words if clip["start"] - 1 <= w["s"] <= clip["end"] + 1]
-        try:
-            usage.set_context(job.get("creator"), job.get("title") or "")
-            raw = brain.english_captions(raw, job.get("lang") or "", job.get("title") or "",
-                                         youtube_english=lambda: _english_part(job, clip))
+        if (job.get("lang") or "").lower().startswith("en"):
+            # English already: the words render as heard, no AI tidy call. roman.words at the end
+            # still keeps every word in a script the caption font can draw.
             clip.update(fixed_words=raw, fixed_for=span)
-        except Exception:  # noqa: BLE001 - captions still render with the words as heard
-            pass
+        else:
+            try:
+                usage.set_context(job.get("creator"), job.get("title") or "")
+                raw = brain.english_captions(raw, job.get("lang") or "", job.get("title") or "",
+                                             youtube_english=lambda: _english_part(job, clip))
+                clip.update(fixed_words=raw, fixed_for=span)
+            except Exception:  # noqa: BLE001 - captions still render with the words as heard
+                pass
     # the last word on it: whatever was said, nothing is drawn in Hindi or Urdu script
     return [dict(w, s=w["s"] - off, e=w["e"] - off) for w in roman.words(raw)]
 
@@ -464,7 +469,7 @@ def _english_part(job, clip):
     return [w for w in en if clip["start"] - 0.5 <= w["s"] <= clip["end"] + 0.5]
 
 
-LONG_VIDEO = 40 * 60   # above this, fetch only the pieces that become clips
+LONG_VIDEO = 5 * 60    # above this, fetch only the pieces that become clips (was 40*60: whole long videos were fetched)
 PAD = 8                # seconds kept either side of a fetched piece, so clips can be re-trimmed
 
 
@@ -570,7 +575,8 @@ def _run_job(job):
         _set(job, status="running", stage="Picking up where it stopped", error=None)
     else:
         _set(job, status="running", stage="Getting the audio", progress=0.03, error=None, clips=[], ai={}, done_blocks=0)
-    if not transcribe.model_ready() and not transcribe.REMOTE:
+    engine, _ = spec.effective_asr_engine()          # the speech model the job will actually use
+    if engine == "parakeet" and not transcribe.model_ready() and not transcribe.REMOTE:
         from . import fetch_model
         _set(job, stage="Getting the speech model (one time, about 480 MB)")
         fetch_model.ensure()
@@ -645,9 +651,11 @@ def _run_job(job):
         began[clip["id"]] = time.time()
         if src["type"] == "url" and (pieces or not whole_video()):
             _fetch_piece(job, clip, audio)
-        if clip["status"] != "error" and clip.get("captions", True) and yt and yt[1].lower().startswith("en"):
+        if (clip["status"] != "error" and clip.get("captions", True) and yt and yt[1].lower().startswith("en")
+                and config.env("PEAKCUT_EXACT_CLIP_ASR", "1") != "0"):
             # The clip was found with YouTube's transcript. What is shown on screen comes from our own model,
             # run on just this clip: full punctuation, nothing blanked out, timings to the word.
+            # PEAKCUT_EXACT_CLIP_ASR=0 skips that re-transcribe and uses YouTube's word timings directly.
             a0, b0 = max(lo, int((clip["start"] - 1.5) * 16000)), min(hi, int((clip["end"] + 1.5) * 16000))
             try:
                 tw = [dict(w, s=round(w["s"] + a0 / 16000, 2), e=round(w["e"] + a0 / 16000, 2)) for w in transcribe.transcribe(audio[a0:b0])]
@@ -659,8 +667,9 @@ def _run_job(job):
         if clip["status"] != "error":
             render_one(job, clip, words_now)
 
-    cpus = os.cpu_count() or 4
-    renders = ThreadPoolExecutor(2 if cpus < 8 else min(6, cpus // 6))  # more clips made at once on a bigger machine
+    n_workers = spec.render_workers()          # Single, Dual or Quad, from Settings, Computer (or .env)
+    renders = ThreadPoolExecutor(n_workers)
+    job["render_workers"] = n_workers          # what this job actually rendered with, kept on the job
     futures = []
     step = BLOCK * 16000 if span > PROGRESSIVE_FROM else hi - lo
     blocks = [(x, min(hi, x + step)) for x in range(lo, hi, step)] or [(lo, hi)]

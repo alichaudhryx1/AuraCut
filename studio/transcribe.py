@@ -1,4 +1,8 @@
-"""Speech to text with word timestamps, using Parakeet 0.6b through sherpa-onnx.
+"""Speech to text with word timestamps.
+
+The engine is faster-whisper's small model when it is installed: it hears Hindi-accented English far better than
+the Parakeet 0.6b model (through sherpa-onnx) that used to do this job, at about half the memory. Parakeet stays
+as the fallback when faster-whisper is missing.
 
 It runs in one of two places. On this machine's processors (the default), or, when PEAKCUT_ASR_URL is set, on a
 separate machine with a graphics card (studio/asr_worker.py), which does the same work many times faster. If that
@@ -191,6 +195,113 @@ def _recognizer():
     return rec
 
 
+# --- faster-whisper: the speech engine used when it is installed ---
+# The small multilingual model, on processors, in 8-bit. Decoding is serialised through one lock: several videos
+# transcribing at once take turns, which keeps the words exact. Which size loads is decided when a job starts
+# (Settings, Computer, or PEAKCUT_FW_MODEL); changing it loads the other size instead of reusing the old one.
+_fw = {"model": None, "name": None}
+_fw_lock = threading.RLock()
+_last = {"engine": None, "fell_back": False}
+
+
+def last_engine() -> dict:
+    """Which speech engine the last transcription actually used, and whether it fell back to another one."""
+    return dict(_last)
+
+
+def _fw_available() -> bool:
+    try:
+        import faster_whisper  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _fw_model():
+    """The one shared faster-whisper model, loaded once per size."""
+    from . import spec
+    name = spec.fw_model()
+    with _fw_lock:
+        if _fw["model"] is None or _fw["name"] != name:
+            from faster_whisper import WhisperModel
+            _fw["model"] = WhisperModel(name, device="cpu", compute_type="int8",
+                                        cpu_threads=2, num_workers=1)
+            _fw["name"] = name
+        return _fw["model"]
+
+
+def _transcribe_fw(todo: list, on_progress=None) -> list:
+    """Decode prepared pieces with faster-whisper, returning [{'w', 's', 'e'}] with absolute times."""
+    model = _fw_model()
+    words = []
+    for i, (a, b, seg) in enumerate(todo):
+        off = a / 16000.0
+        with _fw_lock:
+            segments, _info = model.transcribe(
+                seg, language="en", beam_size=3, vad_filter=True,
+                condition_on_previous_text=False, word_timestamps=True)
+            segments = list(segments)
+        for s in segments:
+            for w in (s.words or []):
+                txt = w.word.strip()
+                if not txt:
+                    continue
+                words.append({"w": txt, "s": round(off + w.start, 2), "e": round(off + w.end, 2)})
+        if on_progress:
+            on_progress((i + 1) / len(todo))
+    # A word lasts until the next one starts, capped so pauses stay pauses.
+    for i, w in enumerate(words):
+        nxt = words[i + 1]["s"] if i + 1 < len(words) else w["e"] + 0.4
+        w["e"] = round(max(w["s"] + 0.08, min(nxt, max(w["e"], w["s"] + 0.6))), 2)
+    return words
+
+
+# --- voice activity: where the speech is, before any decoding ---
+# The Silero detector lives next to the speech model (data/models/silero_vad.onnx). When it cannot run, the old
+# quiet-point chunks below are used instead, so transcription never stops because of it.
+def _vad_model_path():
+    return config.MODELS_DIR / "silero_vad.onnx"
+
+
+def _speech_bounds(audio: np.ndarray):
+    """Speech stretches as (start, end) sample ranges, or None when the detector cannot run.
+    The detector must be fed in 1-second pieces: a whole file at once returns only the last ~0.3 s."""
+    path = _vad_model_path()
+    if not path.is_file():
+        return None
+    try:
+        sherpa_onnx = _sherpa()
+        cfg = sherpa_onnx.VadModelConfig(
+            silero_vad=sherpa_onnx.SileroVadModelConfig(
+                model=str(path), threshold=0.5, min_silence_duration=0.3,
+                min_speech_duration=0.1, max_speech_duration=3600.0, window_size=512),
+            sample_rate=16000,
+        )
+        vad = sherpa_onnx.VoiceActivityDetector(cfg)
+        step = 16000
+        for i in range(0, len(audio), step):
+            vad.accept_waveform(audio[i:i + step])
+        vad.flush()
+        out = []
+        while not vad.empty():
+            seg = vad.front  # a property, not a call: the segment itself, with .start and .samples
+            vad.pop()
+            start = int(seg.start)
+            out.append((start, start + len(seg.samples)))
+        return out
+    except Exception:  # noqa: BLE001 - no detector: the caller falls back to quiet-point chunks
+        return None
+
+
+def _normalise(seg: np.ndarray) -> np.ndarray:
+    """Bring a piece's loudest sample to 0.9, never more than 8x louder: quiet speech then reaches the model
+    at a level it can hear, without blowing out what is already loud."""
+    peak = float(np.max(np.abs(seg))) if len(seg) else 0.0
+    if peak <= 0:
+        return seg
+    return seg * min(0.9 / peak, 8.0)
+
+
 def _chunks(audio: np.ndarray, lo=12.0, hi=24.0):
     """Split at the quietest point between lo and hi seconds so words are not cut in half."""
     sr, hop = 16000, 800  # 50 ms frames
@@ -275,15 +386,39 @@ def _decode_remote(pieces: list) -> list:
 
 def transcribe(audio: np.ndarray, on_progress=None) -> list:
     """Returns [{'w': word, 's': start_sec, 'e': end_sec}, ...] for the whole audio.
-    Speech is cut at quiet moments into 12-24 s pieces; silent pieces are skipped."""
+    Speech stretches come from the voice detector (quiet-point chunks when it cannot run); silent pieces are
+    skipped, and each piece is levelled before decoding so quiet speech reaches the model."""
     global _remote_down_until
     words = []
     todo = []
-    for a, b in _chunks(audio):
-        seg = audio[a:b].astype(np.float32) / 32768.0
-        if len(seg) < 4800 or float(np.sqrt((seg ** 2).mean())) < 0.003:
-            continue  # silence: skip, saves time and avoids made-up words
-        todo.append((a, b, seg))
+    audio_f32 = audio.astype(np.float32) / 32768.0
+    bounds = _speech_bounds(audio_f32)
+    if bounds is None:
+        for a, b in _chunks(audio):
+            seg = audio_f32[a:b]
+            if len(seg) < 4800 or float(np.sqrt((seg ** 2).mean())) < 0.003:
+                continue  # silence: skip, saves time and avoids made-up words
+            todo.append((a, b, _normalise(seg)))
+    else:
+        for a, b in bounds:
+            seg = audio_f32[a:b]
+            if len(seg) < 4800:
+                continue
+            todo.append((a, b, _normalise(seg)))
+    if not todo:
+        return []
+    # Which engine listens is chosen in Settings, Computer (or .env). faster-whisper runs here; the remote
+    # card machine and Parakeet below stay as the fallbacks. If the chosen faster-whisper model cannot
+    # start, Parakeet below is used instead, so a job never fails over a missing model.
+    from . import spec
+    engine, fell_back = spec.effective_asr_engine()
+    if engine.startswith("fw-") and not _remote_ok() and _fw_available():
+        try:
+            words = _transcribe_fw(todo, on_progress)
+            _last.update(engine=engine, fell_back=fell_back)
+            return words
+        except Exception:  # noqa: BLE001 - the model could not start (no download, no disk): Parakeet below
+            fell_back = True
     remote = _remote_ok()
     size = max(1, REMOTE_BATCH if remote else BATCH)
     groups = [todo[i:i + size] for i in range(0, len(todo), size)]
@@ -343,4 +478,5 @@ def transcribe(audio: np.ndarray, on_progress=None) -> list:
     for i, w in enumerate(words):
         nxt = words[i + 1]["s"] if i + 1 < len(words) else w["e"] + 0.4
         w["e"] = round(max(w["s"] + 0.08, min(nxt, max(w["e"], w["s"] + 0.6))), 2)
+    _last.update(engine="remote" if remote else "parakeet", fell_back=fell_back)
     return words
