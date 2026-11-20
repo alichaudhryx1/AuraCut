@@ -115,6 +115,14 @@ PEAKCUT_AI_KEY=your-key-here
 | `ollama` | A model on your own machine, no key | https://ollama.com |
 | `custom` | Any OpenAI-compatible address: also set `PEAKCUT_AI_BASE_URL` | |
 
+### Free AI services
+
+Gemini, Groq and OpenRouter all have a free tier, and Ollama runs on your own computer
+with no key at all. OpenAI, Grok and Claude are paid only. [AI-PROVIDERS-FREE.md](AI-PROVIDERS-FREE.md)
+lists the free models to pick, where each key comes from, and the limits that matter.
+In Settings, AI the services are marked "Free" or "Paid only", and the free models for
+the service you picked appear as buttons under the model box.
+
 - `PEAKCUT_AI_MODELS` is the model id exactly as the service names it. Model names change often, so check the
   service's current list. Several ids separated by commas are tried in order, which gives you a fallback.
 - A fast, inexpensive model is the right choice. A one-hour video is read in about four requests.

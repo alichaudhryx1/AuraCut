@@ -25,8 +25,8 @@ from . import config
 PROVIDERS = {
     "gemini": ("Gemini", "https://generativelanguage.googleapis.com/v1beta/models", "gemini", "https://aistudio.google.com/apikey", "gemini-2.5-flash"),
     "openai": ("OpenAI", "https://api.openai.com/v1", "openai", "https://platform.openai.com/api-keys", "gpt-4o-mini"),
-    "xai": ("Grok", "https://api.x.ai/v1", "openai", "https://console.x.ai", "grok-4"),
-    "groq": ("Groq", "https://api.groq.com/openai/v1", "openai", "https://console.groq.com/keys", "llama-3.3-70b-versatile"),
+    "xai": ("Grok", "https://api.x.ai/v1", "openai", "https://console.x.ai", "grok-4.7"),
+    "groq": ("Groq", "https://api.groq.com/openai/v1", "openai", "https://console.groq.com/keys", "openai/gpt-oss-20b"),
     "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1", "openai", "https://openrouter.ai/keys", "google/gemini-2.5-flash"),
     "anthropic": ("Claude", "https://api.anthropic.com/v1", "anthropic", "https://console.anthropic.com", ""),
     "ollama": ("Ollama (on this machine)", "http://127.0.0.1:11434/v1", "openai", "https://ollama.com", "llama3.1"),
@@ -34,6 +34,34 @@ PROVIDERS = {
 }
 ALIASES = {"google": "gemini", "grok": "xai", "claude": "anthropic", "local": "ollama"}
 NO_KEY = {"ollama", "custom"}       # a model running on your own machine needs no key
+
+# Free use, checked 2026-11-20 (the full story, with the links, is in AI-PROVIDERS-FREE.md).
+# `free` is True when the service lets you call its API without paying, False when it is paid
+# only, and None when it depends on the service a custom address points at. `models` are free
+# model ids that worked on that date; they change often, so the Settings page also offers
+# "Find models", which lists what the service itself reports right now.
+FREE = {
+    "gemini": {"free": True,
+               "models": ["gemini-3.5-flash-lite", "gemini-2.5-flash-lite"],
+               "note": "Free tier, no card. About 15 requests a minute, 1,000 a day on Flash-Lite."},
+    "groq": {"free": True,
+             "models": ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
+             "note": "Free tier, no card. 30 requests a minute, 1,000 a day. The old Llama ids stopped working for free keys on 2026-08-16."},
+    "openrouter": {"free": True,
+                   "models": ["nvidia/nemotron-3.5-lightning:free", "google/gemma-4-31b-it:free", "openrouter/free"],
+                   "note": "Free models end in :free. 20 requests a minute, 50 a day (1,000 a day after $10 of credits). The free list changes often."},
+    "ollama": {"free": True,
+               "models": ["llama3.1"],
+               "note": "Free, no key: the model runs on this computer. Needs Ollama running and enough memory."},
+    "custom": {"free": None, "models": [],
+               "note": "Depends on the service you point it at."},
+    "openai": {"free": False, "models": [],
+               "note": "No free API tier. Paid from the first call (prepaid credits, $5 minimum)."},
+    "xai": {"free": False, "models": [],
+            "note": "No free API tier. The key and the Playground are free; API calls are paid from prepaid credits."},
+    "anthropic": {"free": False, "models": [],
+                  "note": "No free API tier. New accounts get a small one-time credit; after that it is paid."},
+}
 
 # ---------------------------------------------------------------- the settings in use
 _lock = threading.Lock()
@@ -60,14 +88,30 @@ def _from_dashboard() -> dict:
     return _saved["data"]
 
 
+def _saved_key(d: dict, p: str) -> str:
+    """The key saved for one service: the per-service list first, then the single key older
+    saves kept — but only when that save was made for this same service. A key saved for
+    Groq is not a key for Gemini, and must never be offered as one."""
+    ks = d.get("keys")
+    if isinstance(ks, dict) and ks.get(p):
+        return str(ks[p])
+    if d.get("provider") == p:
+        return str(d.get("key") or "")
+    return ""
+
+
 def current() -> dict:
-    """Provider, models, address and key: what the dashboard saved, or else what .env says."""
+    """Provider, models, address and key: what the dashboard saved, or else what .env says.
+    The dashboard wins over .env here (the Settings page is how the choice is made); .env
+    is what a fresh install falls back on. A key saved for a service stays saved when you
+    switch to another service and back."""
     d = _from_dashboard()
     p = str(d.get("provider") or config.AI_PROVIDER or "").strip().lower()
-    return {"provider": ALIASES.get(p, p),
+    pp = ALIASES.get(p, p)
+    return {"provider": pp,
             "models": list(d["models"]) if d.get("provider") else list(config.AI_MODELS),
             "base_url": (str(d.get("base_url") or "") if d.get("provider") else config.AI_BASE_URL).rstrip("/"),
-            "key": str(d["key"]) if d.get("provider") and "key" in d else config.ai_key()}
+            "key": _saved_key(d, pp) if d.get("provider") else config.ai_key()}
 
 
 def provider() -> str:
@@ -100,11 +144,15 @@ def public() -> dict:
     """What the settings page may see. The key itself never leaves the server: only whether there is one, and
     its last four characters so the owner can tell which key it is."""
     c = current()
+    d = _from_dashboard()
+    keys = d.get("keys") if isinstance(d.get("keys"), dict) else {}
     return {"provider": c["provider"], "models": c["models"], "base_url": c["base_url"], "has_key": bool(c["key"]),
             "key_hint": c["key"][-4:] if len(c["key"]) >= 12 else "", "ready": ready(), "label": label(),
             "saved_here": bool(_from_dashboard().get("provider")),
             "configured": list(config.AI_MODELS),           # what PEAKCUT_AI_MODELS lists: the pickable models
-            "providers": [{"id": k, "label": v[0], "address": v[1], "needs_key": k not in NO_KEY, "key_url": v[3], "example": v[4]}
+            "providers": [{"id": k, "label": v[0], "address": v[1], "needs_key": k not in NO_KEY, "key_url": v[3], "example": v[4],
+                           "free": FREE[k]["free"], "free_models": FREE[k]["models"], "free_note": FREE[k]["note"],
+                           "has_key": bool(keys.get(k) or (c["key"] if c["provider"] == k else ""))}
                           for k, v in PROVIDERS.items()]}
 
 
@@ -127,13 +175,28 @@ def save(provider_id: str, model_ids, address: str = "", new_key=None) -> dict:
     if p == "custom" and not address:
         raise ValueError("A custom service needs its address, for example http://127.0.0.1:1234/v1")
     old = current()
-    k = old["key"] if new_key is None and old["provider"] == p else str(new_key or "").strip()[:400]
-    if not k and p not in NO_KEY:
+    saved = _from_dashboard()
+    keys = dict(saved.get("keys") or {}) if isinstance(saved.get("keys"), dict) else {}
+    if old["provider"] and old["key"]:
+        # Keep the key that was in use, so switching services never loses it. (Older saves
+        # kept one key; this moves it into the list the first time a choice is saved.)
+        keys.setdefault(old["provider"], old["key"])
+    if new_key is None:
+        # Nothing pasted: keep the key already saved for this service, if there is one.
+        k = keys.get(p) or (old["key"] if old["provider"] == p else "")
+    else:
+        k = str(new_key or "").strip()[:400]
+    if not k and p not in NO_KEY and new_key != "":
+        # An empty string removes the key for this service; anything else missing is a mistake.
         raise ValueError("Paste the key for this service.")
+    if k:
+        keys[p] = k
+    elif p in keys:
+        del keys[p]
     with _lock:
         f = _file()
         tmp = f.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"provider": p, "models": ms, "base_url": address, "key": k}), encoding="utf-8")
+        tmp.write_text(json.dumps({"provider": p, "models": ms, "base_url": address, "key": k, "keys": keys}), encoding="utf-8")
         try:
             os.chmod(tmp, 0o600)        # the key is only for whoever runs the server
         except OSError:
