@@ -1,3 +1,5 @@
+## Download — [Download AuraCut v1.0 for Windows (exe)](https://github.com/alichaudhryx1/AuraCut/releases/tag/v1.0.0) — No install needed, just extract and double-click AuraCut.exe.
+
 # AuraCut
 
 Turn long videos and live streams into captioned vertical clips, ready to post. Free and open source: run it on
